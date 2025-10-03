@@ -1,10 +1,12 @@
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { useGoogleOAuth } from '@/hooks/use-google-oauth';
 import { useNetworkStatus } from '@/hooks/use-network-status';
 import { useWebViewCache } from '@/hooks/use-webview-cache';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Animated, StyleSheet, Text, View } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
+import { GoogleOAuthHandler } from './google-oauth-handler';
 import { IntelligentPreloader } from './intelligent-preloader';
 import { NetworkStatusIndicator } from './network-status-indicator';
 
@@ -39,6 +41,13 @@ export function OptimizedWebView({
     isCacheEnabled, 
     preloadResources 
   } = useWebViewCache();
+  const {
+    oauthState,
+    handleGoogleOAuthUrl,
+    startAuthentication,
+    handleOAuthSuccess,
+    handleOAuthError,
+  } = useGoogleOAuth();
 
   // Critical resources to preload
   const criticalResources = [
@@ -107,11 +116,17 @@ export function OptimizedWebView({
           document.dispatchEvent(event);
           
           // Force visibility of Google login button
-          var googleButtons = document.querySelectorAll('a[href*="google"], a[data-provider="google"]');
+          var googleButtons = document.querySelectorAll('a[href*="google"], a[data-provider="google"], a[href*="loginSocial=google"]');
           googleButtons.forEach(function(button) {
             button.style.display = 'block';
             button.style.visibility = 'visible';
             button.style.opacity = '1';
+            
+            // Add click handler for Google OAuth
+            button.addEventListener('click', function(e) {
+              console.log('Google OAuth button clicked:', button.href);
+              // Allow the navigation to proceed
+            });
           });
           
           // Re-trigger any lazy loading
@@ -123,7 +138,7 @@ export function OptimizedWebView({
         
         // Additional check after 3 seconds
         setTimeout(function() {
-          var googleButtons = document.querySelectorAll('a[href*="google"], a[data-provider="google"]');
+          var googleButtons = document.querySelectorAll('a[href*="google"], a[data-provider="google"], a[href*="loginSocial=google"]');
           googleButtons.forEach(function(button) {
             if (button.style.display === 'none' || button.style.visibility === 'hidden') {
               button.style.display = 'block';
@@ -132,6 +147,38 @@ export function OptimizedWebView({
             }
           });
         }, 3000);
+        
+        // Monitor for Google OAuth redirects and button clicks
+        var originalLocation = window.location.href;
+        
+        // Detect when user clicks "Siguiente" button
+        setTimeout(function() {
+          var siguienteButtons = document.querySelectorAll('button[type="submit"], input[type="submit"], button:contains("Siguiente"), button:contains("Next")');
+          siguienteButtons.forEach(function(button) {
+            button.addEventListener('click', function() {
+              console.log('Siguiente button clicked - starting authentication');
+              // Send message to React Native to start authentication
+              window.ReactNativeWebView.postMessage(JSON.stringify({
+                type: 'start_authentication'
+              }));
+            });
+          });
+        }, 2000);
+        
+        setInterval(function() {
+          if (window.location.href !== originalLocation) {
+            console.log('URL changed to:', window.location.href);
+            if (window.location.href.includes('despensallena.com') && 
+                (window.location.href.includes('code=') || window.location.href.includes('access_token='))) {
+              console.log('OAuth success detected');
+              // Send message to React Native
+              window.ReactNativeWebView.postMessage(JSON.stringify({
+                type: 'oauth_success',
+                url: window.location.href
+              }));
+            }
+          }
+        }, 1000);
       })();
     `;
     
@@ -164,10 +211,22 @@ export function OptimizedWebView({
     try {
       const data = JSON.parse(event.nativeEvent.data);
       console.log('WebView message:', data);
+      
+      // Handle start authentication message
+      if (data.type === 'start_authentication') {
+        console.log('🚀 Starting authentication from WebView');
+        startAuthentication();
+      }
+      
+      // Handle OAuth success messages
+      if (data.type === 'oauth_success') {
+        console.log('✅ OAuth success detected:', data.url);
+        handleOAuthSuccess();
+      }
     } catch (error) {
       console.log('WebView message (non-JSON):', event.nativeEvent.data);
     }
-  }, []);
+  }, [startAuthentication, handleOAuthSuccess]);
 
   // Retry function
   const handleRetry = useCallback(() => {
@@ -224,21 +283,43 @@ export function OptimizedWebView({
     renderToHardwareTextureAndroid: true,
     // Network optimizations
     onShouldStartLoadWithRequest: (request: any) => {
+      const url = request.url;
+      
+      // Handle Google OAuth URLs
+      if (handleGoogleOAuthUrl(url)) {
+        return true;
+      }
+      
       // Allow navigation to same domain, shortened URLs, and Google OAuth
-      return request.url.includes('despensallena.com') || 
-             request.url.startsWith('data:') || 
-             request.url.startsWith('file:') ||
-             request.url.startsWith('https://tify.cc/') ||
-             request.url.includes('google.com') ||
-             request.url.includes('googleapis.com') ||
-             request.url.includes('gstatic.com') ||
-             request.url.includes('accounts.google.com');
+      return url.includes('despensallena.com') || 
+             url.startsWith('data:') || 
+             url.startsWith('file:') ||
+             url.startsWith('https://tify.cc/') ||
+             url.includes('google.com') ||
+             url.includes('googleapis.com') ||
+             url.includes('gstatic.com') ||
+             url.includes('accounts.google.com') ||
+             url.includes('oauth2.googleapis.com') ||
+             url.includes('loginSocial=google');
     },
   };
 
   return (
     <View style={[styles.container, { backgroundColor: Colors[colorScheme ?? 'light'].background }]}>
       <NetworkStatusIndicator showWhenConnected={isSlowConnection} />
+      
+      {/* Google OAuth Handler */}
+      <GoogleOAuthHandler
+        showProgress={true}
+        onAuthSuccess={() => {
+          console.log('✅ Google OAuth successful');
+          handleOAuthSuccess();
+        }}
+        onAuthError={(error) => {
+          console.error('❌ Google OAuth error:', error);
+          handleOAuthError(error);
+        }}
+      />
       
       {/* Intelligent Preloader */}
       <IntelligentPreloader
