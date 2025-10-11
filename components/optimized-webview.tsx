@@ -1,10 +1,12 @@
+import { WORDPRESS_INJECTION_SCRIPT } from '@/config/wordpress-optimizations';
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useGoogleOAuth } from '@/hooks/use-google-oauth';
 import { useNetworkStatus } from '@/hooks/use-network-status';
 import { useWebViewCache } from '@/hooks/use-webview-cache';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Animated, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
 import { GoogleOAuthHandler } from './google-oauth-handler';
 import { IntelligentPreloader } from './intelligent-preloader';
@@ -15,23 +17,38 @@ interface OptimizedWebViewProps {
   onLoadStart?: () => void;
   onLoadEnd?: () => void;
   onError?: (error: any) => void;
+  onNavigationStateChange?: (canGoBack: boolean) => void;
 }
 
-export function OptimizedWebView({ 
+export interface OptimizedWebViewRef {
+  goBack: () => void;
+}
+
+export const OptimizedWebView = forwardRef<OptimizedWebViewRef, OptimizedWebViewProps>(({ 
   source, 
   onLoadStart, 
   onLoadEnd, 
-  onError 
-}: OptimizedWebViewProps) {
+  onError,
+  onNavigationStateChange 
+}, ref) => {
   const [loading, setLoading] = useState(true);
   const [progress, setProgress] = useState(0);
   const [showProgress, setShowProgress] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
   const [hasError, setHasError] = useState(false);
+  const [isGooglePage, setIsGooglePage] = useState(false);
   
   const colorScheme = useColorScheme();
   const progressAnimation = useRef(new Animated.Value(0)).current;
   const webViewRef = useRef<WebView>(null);
+  const insets = useSafeAreaInsets();
+
+  // Expose methods to parent component
+  useImperativeHandle(ref, () => ({
+    goBack: () => {
+      webViewRef.current?.goBack();
+    },
+  }));
   
   const { isConnected, isInternetReachable, isSlowConnection } = useNetworkStatus();
   const { 
@@ -47,13 +64,19 @@ export function OptimizedWebView({
     startAuthentication,
     handleOAuthSuccess,
     handleOAuthError,
+    resetOAuthState,
   } = useGoogleOAuth();
 
-  // Critical resources to preload
+  // Critical resources to preload - WordPress/WooCommerce optimized
   const criticalResources = [
     'https://despensallena.com/favicon.ico',
     'https://despensallena.com/assets/css/main.css',
     'https://despensallena.com/assets/js/main.js',
+    // WordPress/WooCommerce specific resources
+    'https://despensallena.com/wp-content/themes/despensallena/style.css',
+    'https://despensallena.com/wp-content/plugins/woocommerce/assets/css/woocommerce.css',
+    'https://despensallena.com/wp-content/plugins/woocommerce/assets/js/frontend/woocommerce.min.js',
+    'https://despensallena.com/wp-includes/js/jquery/jquery.min.js',
   ];
 
   // Preload critical resources on mount
@@ -86,10 +109,32 @@ export function OptimizedWebView({
 
   // Handle load start
   const handleLoadStart = useCallback(() => {
+    // Only set loading if it's not already set (to avoid overriding click detection)
     setLoading(true);
     setShowProgress(true);
     setProgress(0);
     setHasError(false);
+    
+    // Check if we're navigating to a Google page
+    const checkGooglePageScript = `
+      (function() {
+        var currentUrl = window.location.href;
+        var isGoogle = currentUrl.includes('accounts.google.com') || 
+                      currentUrl.includes('google.com') ||
+                      currentUrl.includes('googleapis.com');
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'page_check',
+          isGooglePage: isGoogle,
+          url: currentUrl
+        }));
+      })();
+    `;
+    
+    // Delay the script injection slightly to ensure the page has started loading
+    setTimeout(() => {
+      webViewRef.current?.injectJavaScript(checkGooglePageScript);
+    }, 100);
+    
     onLoadStart?.();
   }, [onLoadStart]);
 
@@ -106,9 +151,173 @@ export function OptimizedWebView({
     setProgress(0);
     setRetryCount(0);
     
-    // Inject JavaScript to ensure dynamic content loads properly
-    const injectScript = `
+    // Check if we're on a Google page using JavaScript
+    const checkGooglePageScript = `
       (function() {
+        var currentUrl = window.location.href;
+        var isGoogle = currentUrl.includes('accounts.google.com') || 
+                      currentUrl.includes('google.com') ||
+                      currentUrl.includes('googleapis.com');
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'page_check',
+          isGooglePage: isGoogle,
+          url: currentUrl
+        }));
+      })();
+    `;
+    
+    webViewRef.current?.injectJavaScript(checkGooglePageScript);
+    
+    // Inject WordPress/WooCommerce optimization script
+    const injectScript = WORDPRESS_INJECTION_SCRIPT + `
+      (function() {
+        // Intercept clicks on links to show loading immediately
+        console.log('🔗 Setting up click interceptors for instant loading feedback');
+        
+        function setupClickInterceptors() {
+          // Get all links on the page
+          var links = document.querySelectorAll('a[href]');
+          
+          links.forEach(function(link) {
+            // Skip if already has listener
+            if (link.dataset.hasClickListener) return;
+            
+            link.addEventListener('click', function(e) {
+              var href = link.getAttribute('href');
+              
+              // Check if it's an internal navigation (not external, not anchor, not javascript)
+              if (href && 
+                  !href.startsWith('#') && 
+                  !href.startsWith('javascript:') &&
+                  !href.startsWith('mailto:') &&
+                  !href.startsWith('tel:') &&
+                  !link.target === '_blank') {
+                
+                // Don't intercept Google OAuth links (Google shows its own progress)
+                var isGoogleAuth = href.includes('accounts.google.com') || 
+                                   href.includes('google.com/oauth') ||
+                                   href.includes('loginSocial=google');
+                
+                if (!isGoogleAuth) {
+                  console.log('🖱️ Link clicked, showing loading immediately:', href);
+                  
+                  // Notify React Native to show loading spinner immediately
+                  window.ReactNativeWebView.postMessage(JSON.stringify({
+                    type: 'link_clicked',
+                    url: href,
+                    timestamp: Date.now()
+                  }));
+                }
+              }
+            }, true); // Use capture phase to catch it early
+            
+            link.dataset.hasClickListener = 'true';
+          });
+          
+          // Also intercept product links, buttons and WooCommerce elements
+          var productElements = document.querySelectorAll(
+            '.product a, ' +
+            '.woocommerce-loop-product__link, ' +
+            '.products a, ' +
+            'button[name="add-to-cart"], ' +
+            '.single_add_to_cart_button, ' +
+            '.woocommerce-cart-form button[type="submit"], ' +
+            '.checkout-button, ' +
+            '.button.product_type_simple, ' +
+            '.button.product_type_variable'
+          );
+          
+          productElements.forEach(function(element) {
+            if (element.dataset.hasClickListener) return;
+            
+            element.addEventListener('click', function(e) {
+              // Check if it's a button or link that will cause navigation
+              var willNavigate = element.tagName === 'A' || 
+                                element.classList.contains('single_add_to_cart_button') ||
+                                element.classList.contains('checkout-button');
+              
+              if (willNavigate) {
+                var href = element.getAttribute('href') || window.location.href;
+                console.log('🛒 Product/Commerce element clicked, showing loading:', element.className);
+                
+                window.ReactNativeWebView.postMessage(JSON.stringify({
+                  type: 'link_clicked',
+                  url: href,
+                  element: element.className,
+                  timestamp: Date.now()
+                }));
+              }
+            }, true);
+            
+            element.dataset.hasClickListener = 'true';
+          });
+        }
+        
+        // Initial setup
+        setupClickInterceptors();
+        
+        // Re-setup when DOM changes (for dynamically loaded content)
+        var observer = new MutationObserver(function(mutations) {
+          setupClickInterceptors();
+        });
+        
+        observer.observe(document.body, {
+          childList: true,
+          subtree: true
+        });
+        
+        // Add CSS to handle safe areas for mobile navigation
+        var safeAreaCSS = \`
+          /* Safe area adjustments for mobile navigation */
+          @supports (padding: max(0px)) {
+            .mobile-navigation, 
+            .bottom-navigation,
+            .footer-navigation,
+            nav[role="navigation"],
+            .navbar-bottom,
+            .bottom-nav,
+            .mobile-menu,
+            .fixed-bottom {
+              padding-bottom: max(env(safe-area-inset-bottom), 20px) !important;
+            }
+            
+            /* Ensure content doesn't overlap with system buttons */
+            body {
+              padding-bottom: env(safe-area-inset-bottom) !important;
+            }
+            
+            /* Adjust any fixed bottom elements */
+            .fixed-bottom,
+            .sticky-bottom,
+            .bottom-fixed {
+              bottom: env(safe-area-inset-bottom) !important;
+            }
+          }
+          
+          /* Fallback for devices without safe area support */
+          @media screen and (max-width: 768px) {
+            .mobile-navigation, 
+            .bottom-navigation,
+            .footer-navigation,
+            nav[role="navigation"],
+            .navbar-bottom,
+            .bottom-nav,
+            .mobile-menu,
+            .fixed-bottom {
+              padding-bottom: 60px !important;
+            }
+            
+            body {
+              padding-bottom: 60px !important;
+            }
+          }
+        \`;
+        
+        // Inject the CSS
+        var style = document.createElement('style');
+        style.textContent = safeAreaCSS;
+        document.head.appendChild(style);
+        
         // Force re-render of dynamic content
         setTimeout(function() {
           // Trigger any pending DOM updates
@@ -129,11 +338,20 @@ export function OptimizedWebView({
             });
           });
           
-          // Re-trigger any lazy loading
-          var lazyImages = document.querySelectorAll('img[data-src]');
-          lazyImages.forEach(function(img) {
-            img.src = img.dataset.src;
+          // Optimize WooCommerce product images
+          var productImages = document.querySelectorAll('.woocommerce-product-gallery img, .wp-post-image');
+          productImages.forEach(function(img) {
+            if (img.dataset.src) {
+              img.src = img.dataset.src;
+            }
+            // Add loading optimization
+            img.loading = 'lazy';
           });
+          
+          // Optimize WooCommerce cart updates
+          if (typeof wc_add_to_cart_params !== 'undefined') {
+            wc_add_to_cart_params.cart_redirect_after_add = 'no';
+          }
         }, 1000);
         
         // Additional check after 3 seconds
@@ -151,32 +369,105 @@ export function OptimizedWebView({
         // Monitor for Google OAuth redirects and button clicks
         var originalLocation = window.location.href;
         
-        // Detect when user clicks "Siguiente" button
+        // Detect when user clicks "Siguiente" button for final authentication
         setTimeout(function() {
-          var siguienteButtons = document.querySelectorAll('button[type="submit"], input[type="submit"], button:contains("Siguiente"), button:contains("Next")');
-          siguienteButtons.forEach(function(button) {
-            button.addEventListener('click', function() {
-              console.log('Siguiente button clicked - starting authentication');
-              // Send message to React Native to start authentication
-              window.ReactNativeWebView.postMessage(JSON.stringify({
-                type: 'start_authentication'
-              }));
+          function addButtonListeners() {
+            // Look for various button types that could be the "Next" button
+            var selectors = [
+              'button[type="submit"]',
+              'input[type="submit"]',
+              'button[data-primary-action]',
+              'button[aria-label*="Next"]',
+              'button[aria-label*="Siguiente"]'
+            ];
+            
+            selectors.forEach(function(selector) {
+              try {
+                var buttons = document.querySelectorAll(selector);
+                buttons.forEach(function(button) {
+                  // Check if button text contains relevant keywords
+                  var buttonText = button.textContent || button.innerText || '';
+                  var currentUrl = window.location.href;
+                  
+                  // Only activate spinner if this is the final authentication step
+                  // Check if we're on a password page or similar final step
+                  var isFinalStep = currentUrl.includes('/pwd') || 
+                                   currentUrl.includes('/password') ||
+                                   currentUrl.includes('/signin/v2/pwd') ||
+                                   (currentUrl.includes('accounts.google.com') && 
+                                    !currentUrl.includes('/identifier') && 
+                                    !currentUrl.includes('/select-account'));
+                  
+                  if (isFinalStep && (
+                      buttonText.toLowerCase().includes('next') || 
+                      buttonText.toLowerCase().includes('siguiente') ||
+                      buttonText.toLowerCase().includes('continuar') ||
+                      buttonText.toLowerCase().includes('continue') ||
+                      button.type === 'submit' ||
+                      button.getAttribute('data-primary-action'))) {
+                    
+                    console.log('Found final authentication button:', buttonText, currentUrl);
+                    
+                    // Remove any existing listeners to avoid duplicates
+                    button.removeEventListener('click', handleAuthenticationClick);
+                    button.addEventListener('click', handleAuthenticationClick);
+                  }
+                });
+              } catch (e) {
+                console.log('Selector error:', selector, e);
+              }
             });
-          });
+          }
+          
+          function handleAuthenticationClick(e) {
+            console.log('Final authentication button clicked - Google will handle its own progress indicators');
+            // Don't send authentication message - Google shows its own progress
+            // Just log for debugging purposes
+          }
+          
+          // Initial setup
+          addButtonListeners();
+          
+          // Re-setup when URL changes (for dynamic content)
+          var lastUrl = window.location.href;
+          setInterval(function() {
+            if (window.location.href !== lastUrl) {
+              lastUrl = window.location.href;
+              console.log('URL changed, re-setting up button listeners');
+              setTimeout(addButtonListeners, 1000);
+            }
+          }, 1000);
+          
         }, 2000);
         
         setInterval(function() {
           if (window.location.href !== originalLocation) {
             console.log('URL changed to:', window.location.href);
-            if (window.location.href.includes('despensallena.com') && 
-                (window.location.href.includes('code=') || window.location.href.includes('access_token='))) {
+            var currentUrl = window.location.href;
+            
+            // Check if navigating to password page
+            if (currentUrl.includes('/pwd') || 
+                currentUrl.includes('/password') ||
+                currentUrl.includes('/signin/v2/pwd')) {
+              console.log('Navigating to password page - resetting authentication state');
+              window.ReactNativeWebView.postMessage(JSON.stringify({
+                type: 'navigate_to_password',
+                url: currentUrl
+              }));
+            }
+            
+            // Check for OAuth success
+            if (currentUrl.includes('despensallena.com') && 
+                (currentUrl.includes('code=') || currentUrl.includes('access_token='))) {
               console.log('OAuth success detected');
               // Send message to React Native
               window.ReactNativeWebView.postMessage(JSON.stringify({
                 type: 'oauth_success',
-                url: window.location.href
+                url: currentUrl
               }));
             }
+            
+            originalLocation = currentUrl;
           }
         }, 1000);
       })();
@@ -206,16 +497,36 @@ export function OptimizedWebView({
     }
   }, [retryCount, isConnected, onError]);
 
+  // Handle navigation state change
+  const handleNavigationStateChange = useCallback((navState: any) => {
+    console.log('Navigation state changed:', {
+      canGoBack: navState.canGoBack,
+      canGoForward: navState.canGoForward,
+      url: navState.url
+    });
+    
+    // Notify parent component if callback is provided
+    onNavigationStateChange?.(navState.canGoBack);
+  }, [onNavigationStateChange]);
+
   // Handle message from WebView
   const handleMessage = useCallback((event: WebViewMessageEvent) => {
     try {
       const data = JSON.parse(event.nativeEvent.data);
       console.log('WebView message:', data);
       
-      // Handle start authentication message
+      // Handle link click - show loading immediately for instant feedback
+      if (data.type === 'link_clicked') {
+        console.log('🖱️ Link clicked detected, showing loading immediately:', data.url);
+        setLoading(true);
+        setShowProgress(true);
+        setProgress(0);
+      }
+      
+      // Handle start authentication message (disabled - Google shows its own progress)
       if (data.type === 'start_authentication') {
-        console.log('🚀 Starting authentication from WebView');
-        startAuthentication();
+        console.log('🚀 Authentication button clicked - Google will handle progress indicators');
+        // Don't start authentication spinner - Google has its own progress
       }
       
       // Handle OAuth success messages
@@ -223,10 +534,23 @@ export function OptimizedWebView({
         console.log('✅ OAuth success detected:', data.url);
         handleOAuthSuccess();
       }
+      
+      // Handle navigation to password page
+      if (data.type === 'navigate_to_password') {
+        console.log('📝 Navigating to password page - resetting authentication state');
+        // Reset authentication state when navigating to password page
+        resetOAuthState();
+      }
+      
+      // Handle page check to determine if we're on Google
+      if (data.type === 'page_check') {
+        console.log('🔍 Page check result:', data.isGooglePage, data.url);
+        setIsGooglePage(data.isGooglePage);
+      }
     } catch (error) {
       console.log('WebView message (non-JSON):', event.nativeEvent.data);
     }
-  }, [startAuthentication, handleOAuthSuccess]);
+  }, [startAuthentication, handleOAuthSuccess, resetOAuthState]);
 
   // Retry function
   const handleRetry = useCallback(() => {
@@ -248,7 +572,6 @@ export function OptimizedWebView({
   // WebView configuration for optimal performance
   const webViewConfig = {
     source,
-    style: styles.webview,
     javaScriptEnabled: true,
     domStorageEnabled: true,
     startInLoadingState: false,
@@ -279,6 +602,7 @@ export function OptimizedWebView({
     onLoadEnd: handleLoadEnd,
     onError: handleError,
     onMessage: handleMessage,
+    onNavigationStateChange: handleNavigationStateChange,
     // Performance optimizations
     renderToHardwareTextureAndroid: true,
     // Network optimizations
@@ -305,7 +629,7 @@ export function OptimizedWebView({
   };
 
   return (
-    <View style={[styles.container, { backgroundColor: Colors[colorScheme ?? 'light'].background }]}>
+    <SafeAreaView style={[styles.container, { backgroundColor: Colors[colorScheme ?? 'light'].background }]}>
       <NetworkStatusIndicator showWhenConnected={isSlowConnection} />
       
       {/* Google OAuth Handler */}
@@ -353,7 +677,7 @@ export function OptimizedWebView({
         </View>
       )}
       
-      {loading && (
+      {loading && !isGooglePage && (
         <View style={styles.loadingContainer}>
           <ActivityIndicator 
             size="large" 
@@ -383,10 +707,11 @@ export function OptimizedWebView({
       <WebView
         ref={webViewRef}
         {...webViewConfig}
+        style={[styles.webview, { marginBottom: insets.bottom }]}
       />
-    </View>
+    </SafeAreaView>
   );
-}
+});
 
 const styles = StyleSheet.create({
   container: {

@@ -55,13 +55,22 @@ export const WEBVIEW_CONFIG = {
   },
 };
 
-// Critical resources for preloading
+// Critical resources for preloading - WordPress/WooCommerce optimized
 export const CRITICAL_RESOURCES = [
   'https://despensallena.com/favicon.ico',
   'https://despensallena.com/assets/css/main.css',
   'https://despensallena.com/assets/js/main.js',
   'https://despensallena.com/assets/images/logo.png',
   'https://despensallena.com/assets/images/hero-bg.jpg',
+  // WordPress/WooCommerce specific resources
+  'https://despensallena.com/wp-content/themes/despensallena/style.css',
+  'https://despensallena.com/wp-content/plugins/woocommerce/assets/css/woocommerce.css',
+  'https://despensallena.com/wp-content/plugins/woocommerce/assets/js/frontend/woocommerce.min.js',
+  'https://despensallena.com/wp-includes/js/jquery/jquery.min.js',
+  'https://despensallena.com/wp-content/uploads/woocommerce_uploads/',
+  // Critical WooCommerce endpoints
+  'https://despensallena.com/wc-api/v3/products',
+  'https://despensallena.com/wc-api/v3/categories',
 ];
 
 // Cache strategies

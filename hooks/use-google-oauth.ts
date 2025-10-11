@@ -43,28 +43,13 @@ export function useGoogleOAuth() {
       
       console.log('✅ Google OAuth URL detected');
       
-      // Only start authenticating if it's not a login form
-      // Don't show spinner on login/email entry pages
-      if (!url.includes('/signin/') && 
-          !url.includes('/password') && 
-          !url.includes('/challenge/') &&
-          !url.includes('/select-account')) {
-        
-        setOauthState(prev => ({
-          ...prev,
-          isAuthenticating: true,
-          authError: null,
-        }));
-
-        // Set timeout for authentication
-        authTimeoutRef.current = setTimeout(() => {
-          setOauthState(prev => ({
-            ...prev,
-            isAuthenticating: false,
-            authError: 'Authentication timeout',
-          }));
-        }, 30000); // 30 seconds timeout
-      }
+      // Never show spinner on any Google OAuth pages - Google has its own progress indicators
+      console.log('📝 Google OAuth page detected - keeping authentication state disabled');
+      setOauthState(prev => ({
+        ...prev,
+        isAuthenticating: false, // Always keep as false for Google pages
+        authError: null,
+      }));
 
       return true; // Allow the request
     }
@@ -74,21 +59,14 @@ export function useGoogleOAuth() {
 
   // Start authentication process (called when user clicks "Siguiente")
   const startAuthentication = useCallback(() => {
-    console.log('🚀 Starting Google OAuth authentication');
+    console.log('🚀 Starting Google OAuth authentication - but not showing spinner (Google has its own progress)');
+    // Don't activate spinner for Google OAuth - Google shows its own progress indicators
+    // Just log the authentication start for debugging purposes
     setOauthState(prev => ({
       ...prev,
-      isAuthenticating: true,
+      isAuthenticating: false, // Keep as false so no spinner shows
       authError: null,
     }));
-
-    // Set timeout for authentication
-    authTimeoutRef.current = setTimeout(() => {
-      setOauthState(prev => ({
-        ...prev,
-        isAuthenticating: false,
-        authError: 'Authentication timeout',
-      }));
-    }, 30000); // 30 seconds timeout
   }, []);
 
   // Handle OAuth success

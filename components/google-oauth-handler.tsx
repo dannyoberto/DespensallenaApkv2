@@ -29,11 +29,14 @@ export function GoogleOAuthHandler({
     if (oauthState.isAuthenticating) {
       setIsVisible(true);
     } else if (oauthState.authSuccess || oauthState.authError) {
-      // Hide after 3 seconds
+      // Hide after 2 seconds
       setTimeout(() => {
         setIsVisible(false);
         resetOAuthState();
-      }, 3000);
+      }, 2000);
+    } else {
+      // Hide immediately if not authenticating
+      setIsVisible(false);
     }
   }, [oauthState, resetOAuthState]);
 
@@ -79,6 +82,7 @@ export function GoogleOAuthHandler({
     return Colors[colorScheme ?? 'light'].spinner;
   };
 
+  // Don't show spinner on any Google pages - Google has its own progress indicators
   if (!showProgress || !isVisible) {
     return null;
   }
@@ -110,12 +114,17 @@ const styles = StyleSheet.create({
     top: 0,
     left: 0,
     right: 0,
-    zIndex: 15,
+    zIndex: 5,
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingVertical: 8,
     backgroundColor: 'rgba(255, 255, 255, 0.95)',
     borderBottomWidth: 1,
     borderBottomColor: '#e0e0e0',
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
   },
   content: {
     flexDirection: 'row',
