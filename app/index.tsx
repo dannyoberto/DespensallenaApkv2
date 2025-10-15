@@ -1,4 +1,5 @@
-import { OptimizedWebView, OptimizedWebViewRef } from '@/components/optimized-webview';
+import { OptimizedWebView, OptimizedWebViewRef } from '@/components/optimized-webview-v2';
+import { logger } from '@/utils/logger';
 import React, { useEffect, useRef, useState } from 'react';
 import { Alert, BackHandler } from 'react-native';
 
@@ -43,14 +44,15 @@ export default function HomeScreen() {
     <OptimizedWebView
       ref={webViewRef}
       source={{ uri: 'https://despensallena.com' }}
+      baseUrl="https://despensallena.com"
       onLoadStart={() => {
-        console.log('WebView loading started');
+        logger.info('📱 WebView loading started');
       }}
       onLoadEnd={() => {
-        console.log('WebView loading completed');
+        logger.info('✅ WebView loading completed');
       }}
       onError={(error) => {
-        console.error('WebView error:', error);
+        logger.error('❌ WebView error:', error);
       }}
       onNavigationStateChange={(canGoBack) => {
         setCanGoBack(canGoBack);

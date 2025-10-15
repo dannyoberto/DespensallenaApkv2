@@ -9,22 +9,23 @@ import {
     injectScriptLazy,
     INTERACTIVE_INJECTION_SCRIPT
 } from '@/config/injection-scripts';
-import { Colors } from '@/constants/theme';
 import { useCacheManager } from '@/hooks/use-cache-manager';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useGoogleOAuth } from '@/hooks/use-google-oauth';
 import { useNetworkStatus } from '@/hooks/use-network-status';
 import { webviewLogger } from '@/utils/logger';
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
-import { ActivityIndicator, Animated, StyleSheet, Text, View } from 'react-native';
+import { Animated, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
 import { GoogleOAuthHandler } from './google-oauth-handler';
-import { IntelligentPreloader } from './intelligent-preloader';
+// import { IntelligentPreloader } from './intelligent-preloader'; // DISABLED: Not needed for WordPress
 import { NetworkStatusIndicator } from './network-status-indicator';
+import { IconSymbol } from './ui/icon-symbol';
 
 interface OptimizedWebViewProps {
   source: { uri: string };
+  baseUrl?: string; // URL principal para el botón Home
   onLoadStart?: () => void;
   onLoadEnd?: () => void;
   onError?: (error: any) => void;
@@ -39,6 +40,7 @@ export interface OptimizedWebViewRef {
 
 export const OptimizedWebView = forwardRef<OptimizedWebViewRef, OptimizedWebViewProps>(({ 
   source, 
+  baseUrl,
   onLoadStart, 
   onLoadEnd, 
   onError,
@@ -52,11 +54,23 @@ export const OptimizedWebView = forwardRef<OptimizedWebViewRef, OptimizedWebView
   const [hasError, setHasError] = useState(false);
   const [isGooglePage, setIsGooglePage] = useState(false);
   const [currentUrl, setCurrentUrl] = useState(source.uri);
+  const [canGoBack, setCanGoBack] = useState(false);
+  
+  // Calculate dynamic bottom spacing
+  const getBottomSpacing = () => {
+    const baseSpacing = Math.max(insets.bottom, 20);
+    const navigationHeight = 60; // Approximate height of navigation footer
+    const debugHeight = __DEV__ ? 20 : 0; // Height of debug info when visible
+    
+    // Don't add progress bar height here since it's positioned absolutely
+    return baseSpacing + navigationHeight + debugHeight;
+  };
   
   // Refs
   const webViewRef = useRef<WebView>(null);
   const progressAnimation = useRef(new Animated.Value(0)).current;
   const lastLoadTime = useRef<number>(0);
+  const loadingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
   // Hooks
   const colorScheme = useColorScheme();
@@ -146,6 +160,27 @@ export const OptimizedWebView = forwardRef<OptimizedWebViewRef, OptimizedWebView
     webviewLogger.info(`⏱️ Page loaded in ${loadTime}ms`);
   }, []);
 
+  // Clear loading timeout
+  const clearLoadingTimeout = useCallback(() => {
+    if (loadingTimeoutRef.current) {
+      clearTimeout(loadingTimeoutRef.current);
+      loadingTimeoutRef.current = null;
+    }
+  }, []);
+
+  // Force stop loading after timeout (prevents spinner from getting stuck)
+  const startLoadingTimeout = useCallback(() => {
+    clearLoadingTimeout();
+    
+    // Auto-hide loading indicator after 30 seconds max
+    loadingTimeoutRef.current = setTimeout(() => {
+      webviewLogger.warn('⚠️ Loading timeout reached - forcing loading state to false');
+      setLoading(false);
+      setShowProgress(false);
+      setProgress(0);
+    }, 30000);
+  }, [clearLoadingTimeout]);
+
   // Handle load start
   const handleLoadStart = useCallback(() => {
     markLoadStart();
@@ -154,8 +189,11 @@ export const OptimizedWebView = forwardRef<OptimizedWebViewRef, OptimizedWebView
     setProgress(0);
     setHasError(false);
     
+    // Start timeout to prevent stuck spinner
+    startLoadingTimeout();
+    
     onLoadStart?.();
-  }, [onLoadStart, markLoadStart]);
+  }, [onLoadStart, markLoadStart, startLoadingTimeout]);
 
   // Handle load progress
   const handleLoadProgress = useCallback((syntheticEvent: any) => {
@@ -166,6 +204,10 @@ export const OptimizedWebView = forwardRef<OptimizedWebViewRef, OptimizedWebView
   // Handle load end
   const handleLoadEnd = useCallback(() => {
     markLoadEnd();
+    
+    // Clear loading timeout
+    clearLoadingTimeout();
+    
     setLoading(false);
     setShowProgress(false);
     setProgress(0);
@@ -193,12 +235,15 @@ export const OptimizedWebView = forwardRef<OptimizedWebViewRef, OptimizedWebView
     }, 1000);
     
     onLoadEnd?.();
-  }, [onLoadEnd, markLoadEnd]);
+  }, [onLoadEnd, markLoadEnd, clearLoadingTimeout]);
 
   // Handle error
   const handleError = useCallback((syntheticEvent: any) => {
     const { nativeEvent } = syntheticEvent;
     webviewLogger.error('WebView error:', nativeEvent);
+    
+    // Clear loading timeout
+    clearLoadingTimeout();
     
     setLoading(false);
     setShowProgress(false);
@@ -216,11 +261,12 @@ export const OptimizedWebView = forwardRef<OptimizedWebViewRef, OptimizedWebView
     } else {
       onError?.(nativeEvent);
     }
-  }, [retryCount, isConnected, onError]);
+  }, [retryCount, isConnected, onError, clearLoadingTimeout]);
 
   // Handle navigation state change
   const handleNavigationStateChange = useCallback((navState: any) => {
     setCurrentUrl(navState.url);
+    setCanGoBack(navState.canGoBack);
     
     // Check if we're on a Google page
     const isGoogle = navState.url.includes('accounts.google.com') || 
@@ -258,6 +304,7 @@ export const OptimizedWebView = forwardRef<OptimizedWebViewRef, OptimizedWebView
           setLoading(true);
           setShowProgress(true);
           setProgress(0);
+          startLoadingTimeout();
           break;
           
         case 'page_html':
@@ -300,7 +347,7 @@ export const OptimizedWebView = forwardRef<OptimizedWebViewRef, OptimizedWebView
       // Non-JSON message, ignore
       webviewLogger.debug('📨 Non-JSON message:', event.nativeEvent.data);
     }
-  }, [googleOAuth, cachePage]);
+  }, [googleOAuth, cachePage, startLoadingTimeout]);
 
   // Retry function
   const handleRetry = useCallback(() => {
@@ -309,12 +356,27 @@ export const OptimizedWebView = forwardRef<OptimizedWebViewRef, OptimizedWebView
     webViewRef.current?.reload();
   }, []);
 
+  // Handle Back button
+  const handleGoBack = useCallback(() => {
+    if (canGoBack) {
+      webViewRef.current?.goBack();
+      webviewLogger.debug('🔙 Navigating back');
+    }
+  }, [canGoBack]);
+
+  // Handle Home button
+  const handleGoHome = useCallback(() => {
+    const homeUrl = baseUrl || source.uri;
+    webViewRef.current?.injectJavaScript(`window.location.href = '${homeUrl}';`);
+    webviewLogger.debug('🏠 Navigating to home:', homeUrl);
+  }, [baseUrl, source.uri]);
+
   // WebView configuration for optimal performance
   const webViewConfig = {
     source,
     javaScriptEnabled: true,
     domStorageEnabled: true,
-    startInLoadingState: false,
+    startInLoadingState: true,
     scalesPageToFit: true,
     allowsInlineMediaPlayback: true,
     mediaPlaybackRequiresUserAction: false,
@@ -377,10 +439,11 @@ export const OptimizedWebView = forwardRef<OptimizedWebViewRef, OptimizedWebView
                             url.includes('gstatic.com');
         
         if (isMainFrame && !isGoogleAuth && url !== currentUrl) {
-          webviewLogger.debug('🚀 Navigation detected - activating spinner immediately:', url);
+          webviewLogger.debug('🚀 Navigation detected - activating progress bar immediately:', url);
           setLoading(true);
           setShowProgress(true);
           setProgress(0);
+          startLoadingTimeout();
         }
       }
       
@@ -402,8 +465,15 @@ export const OptimizedWebView = forwardRef<OptimizedWebViewRef, OptimizedWebView
     return () => clearInterval(interval);
   }, [cacheManager]);
 
+  // Cleanup loading timeout on unmount
+  useEffect(() => {
+    return () => {
+      clearLoadingTimeout();
+    };
+  }, [clearLoadingTimeout]);
+
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: Colors[colorScheme ?? 'light'].background }]} edges={['top', 'left', 'right']}>
+    <SafeAreaView style={[styles.container, { backgroundColor: '#80b918' }]} edges={['top', 'left', 'right']}>
       <NetworkStatusIndicator showWhenConnected={isSlowConnection} />
       
       {/* Google OAuth Handler - Only show when not on Google pages */}
@@ -419,7 +489,10 @@ export const OptimizedWebView = forwardRef<OptimizedWebViewRef, OptimizedWebView
         }}
       />
       
-      {/* Intelligent Preloader */}
+      {/* Intelligent Preloader - DISABLED for WordPress/WooCommerce */}
+      {/* WordPress already handles its own optimization and caching */}
+      {/* The WebView's native caching is sufficient for this use case */}
+      {/*
       <IntelligentPreloader
         strategy="ESSENTIAL"
         showProgress={false}
@@ -432,39 +505,7 @@ export const OptimizedWebView = forwardRef<OptimizedWebViewRef, OptimizedWebView
           webviewLogger.warn(`❌ Preloading error: ${error}`);
         }}
       />
-      
-      {/* Progress Bar */}
-      {showProgress && (
-        <View style={styles.progressContainer}>
-          <View style={styles.progressTrack}>
-            <Animated.View
-              style={[
-                styles.progressBar,
-                {
-                  backgroundColor: Colors[colorScheme ?? 'light'].spinner,
-                  width: progressAnimation.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: ['0%', '100%'],
-                  }),
-                },
-              ]}
-            />
-          </View>
-        </View>
-      )}
-      
-      {/* Loading Indicator */}
-      {loading && !isGooglePage && (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator 
-            size="large" 
-            color={Colors[colorScheme ?? 'light'].spinner} 
-          />
-          {isSlowConnection && (
-            <Text style={styles.loadingText}>Conexión lenta detectada...</Text>
-          )}
-        </View>
-      )}
+      */}
       
       {/* Error States */}
       {hasError && !isConnected && (
@@ -489,12 +530,74 @@ export const OptimizedWebView = forwardRef<OptimizedWebViewRef, OptimizedWebView
       <WebView
         ref={webViewRef}
         {...webViewConfig}
-        style={[styles.webview, { marginBottom: Math.max(insets.bottom + 40, 60) }]}
+        style={[styles.webview, { marginBottom: getBottomSpacing() }]}
       />
+      
+      {/* Navigation Footer Bar */}
+      <View style={[styles.navigationFooter, { 
+        bottom: Math.max(insets.bottom, 20) 
+      }]}>
+        <TouchableOpacity
+          style={[styles.navButton, !canGoBack && styles.navButtonDisabled]}
+          onPress={handleGoBack}
+          disabled={!canGoBack}
+          activeOpacity={0.7}
+        >
+          <IconSymbol
+            name="arrow.left"
+            size={22}
+            color={canGoBack ? '#FFFFFF' : 'rgba(255, 255, 255, 0.4)'}
+          />
+          <Text style={[styles.navButtonText, !canGoBack && styles.navButtonTextDisabled]}>
+            Atrás
+          </Text>
+        </TouchableOpacity>
+        
+        <TouchableOpacity
+          style={styles.navButton}
+          onPress={handleGoHome}
+          activeOpacity={0.7}
+        >
+          <IconSymbol
+            name="house.fill"
+            size={22}
+            color="#FFFFFF"
+          />
+          <Text style={styles.navButtonText}>Inicio</Text>
+        </TouchableOpacity>
+      </View>
+      
+      {/* Footer Progress Bar - Non-blocking */}
+      {showProgress && (
+        <View style={[styles.footerProgressContainer, { 
+          bottom: Math.max(insets.bottom + 60, 80) 
+        }]}>
+          <View style={styles.footerProgressTrack}>
+            <Animated.View
+              style={[
+                styles.footerProgressBar,
+                {
+                  width: progressAnimation.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: ['0%', '100%'],
+                  }),
+                },
+              ]}
+            />
+          </View>
+          {isSlowConnection && (
+            <Text style={styles.footerProgressText}>Conexión lenta...</Text>
+          )}
+        </View>
+      )}
       
       {/* Cache Info (Debug) */}
       {__DEV__ && (
-        <View style={[styles.debugInfo, { bottom: Math.max(insets.bottom + 40, 60) }]}>
+        <View style={[styles.debugInfo, { 
+          bottom: showProgress 
+            ? Math.max(insets.bottom + 100, 120) 
+            : Math.max(insets.bottom + 60, 80) 
+        }]}>
           <Text style={styles.debugText}>
             Cache: {cacheManager.config.enabled ? 'ON' : 'OFF'} | 
             Net: {connectionType} | 
@@ -513,37 +616,42 @@ const styles = StyleSheet.create({
   webview: {
     flex: 1,
   },
-  progressContainer: {
+  footerProgressContainer: {
     position: 'absolute',
-    top: 0,
     left: 0,
     right: 0,
-    zIndex: 2,
-    backgroundColor: 'transparent',
+    zIndex: 20,
+    backgroundColor: '#80b918',
+    paddingVertical: 4,
+    paddingHorizontal: 16,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.2)',
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+    borderTopLeftRadius: 8,
+    borderTopRightRadius: 8,
   },
-  progressTrack: {
-    height: 3,
-    backgroundColor: 'rgba(255,255,255,0.3)',
+  footerProgressTrack: {
+    height: 5,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    borderRadius: 3,
     overflow: 'hidden',
   },
-  progressBar: {
+  footerProgressBar: {
     height: '100%',
-    borderRadius: 0,
+    borderRadius: 3,
+    backgroundColor: '#FFFFFF',
   },
-  loadingContainer: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 1,
-  },
-  loadingText: {
-    marginTop: 12,
-    color: '#666',
-    fontSize: 14,
+  footerProgressText: {
+    marginTop: 6,
+    color: '#FFFFFF',
+    fontSize: 12,
+    textAlign: 'center',
+    fontWeight: '700',
+    letterSpacing: 0.5,
   },
   errorContainer: {
     position: 'absolute',
@@ -574,14 +682,63 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 0,
     right: 0,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    padding: 4,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    padding: 3,
     zIndex: 10,
+    borderTopLeftRadius: 6,
+    borderTopRightRadius: 6,
   },
   debugText: {
     color: '#00ff00',
     fontSize: 10,
     fontFamily: 'monospace',
+  },
+  navigationFooter: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    alignItems: 'center',
+    backgroundColor: '#80b918',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderTopWidth: 0,
+    elevation: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    zIndex: 15,
+    borderTopLeftRadius: 12,
+    borderTopRightRadius: 12,
+  },
+  navButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+    minWidth: 100,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.3)',
+  },
+  navButtonDisabled: {
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+    opacity: 0.6,
+  },
+  navButtonText: {
+    marginLeft: 8,
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#FFFFFF',
+    letterSpacing: 0.3,
+  },
+  navButtonTextDisabled: {
+    color: 'rgba(255, 255, 255, 0.5)',
   },
 });
 

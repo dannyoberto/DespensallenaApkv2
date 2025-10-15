@@ -35,11 +35,14 @@ export function useGoogleOAuth() {
   const handleGoogleOAuthUrl = useCallback((url: string): boolean => {
     console.log('🔍 Checking Google OAuth URL:', url);
 
-    // Check if it's a Google OAuth URL
+    // Check if it's a Google OAuth URL (more comprehensive)
     if (url.includes('accounts.google.com') || 
         url.includes('oauth2.googleapis.com') ||
         url.includes('google.com/oauth') ||
-        url.includes('loginSocial=google')) {
+        url.includes('loginSocial=google') ||
+        url.includes('google.com/signin') ||
+        url.includes('google.com/accounts') ||
+        url.includes('gstatic.com')) {
       
       console.log('✅ Google OAuth URL detected');
       

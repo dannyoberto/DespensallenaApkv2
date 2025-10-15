@@ -24,7 +24,7 @@ export function GoogleOAuthHandler({
     resetOAuthState,
   } = useGoogleOAuth();
 
-  // Show handler when authentication starts
+  // Show handler when authentication starts (but never on Google pages)
   useEffect(() => {
     if (oauthState.isAuthenticating) {
       setIsVisible(true);
