@@ -5,7 +5,7 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "Despensallena",
+    "scheme": "despensallena",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "splash": {
@@ -44,12 +44,7 @@
         "ACCESS_WIFI_STATE",
         "WRITE_EXTERNAL_STORAGE",
         "READ_EXTERNAL_STORAGE"
-      ],
-      "hardwareAccelerated": true,
-      "largeHeap": true,
-      "compileSdkVersion": 34,
-      "targetSdkVersion": 34,
-      "minSdkVersion": 21
+      ]
     },
     "web": {
       "output": "static",
