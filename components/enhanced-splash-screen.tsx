@@ -5,6 +5,7 @@
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useNetworkStatus } from '@/hooks/use-network-status';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { LinearGradient } from 'expo-linear-gradient';
 import React, { useEffect, useRef, useState } from 'react';
 import {
@@ -12,6 +13,7 @@ import {
     Dimensions,
     Easing,
     Image,
+    Platform,
     StyleSheet,
     Text,
     View,
@@ -22,7 +24,51 @@ interface EnhancedSplashScreenProps {
   duration?: number;
 }
 
+type SplashMode = 'full' | 'minimal' | 'off';
+
+interface RemoteSplashMessage {
+  id: number;
+  title: string;
+  subtitle: string | null;
+  icon_emoji: string | null;
+  image_url: string | null;
+}
+
+interface RemoteSplashResponse {
+  ok: boolean;
+  app_slug: string;
+  version: number;
+  flags?: {
+    enabled?: boolean;
+    mode?: SplashMode;
+    minimal_duration_ms?: number;
+    cache_ttl_seconds?: number;
+  };
+  messages?: RemoteSplashMessage[];
+}
+
+interface FallbackSplashMessage {
+  title: string;
+  subtitle: string;
+  icon: string;
+}
+
+type SplashDisplayMessage = RemoteSplashMessage | FallbackSplashMessage;
+
 const { width, height } = Dimensions.get('window');
+const SPLASH_API_URL = 'https://ivory-termite-568859.hostingersite.com/ApiDespensallenaApk/public/api/v1/splash';
+const SPLASH_API_KEY = 'key-despensa';
+const REQUEST_TIMEOUT_MS = 6000;
+const SPLASH_CACHE_KEY = '@despensallena_splash_cache_v1';
+const DEFAULT_CACHE_TTL_SECONDS = 300;
+const DEFAULT_MINIMAL_DURATION_MS = 400;
+const DEFAULT_FULL_DURATION_MS = 3000;
+
+interface CachedSplashPayload {
+  savedAt: number;
+  ttlSeconds: number;
+  data: RemoteSplashResponse;
+}
 
 // Mensajes dinámicos basados en la hora del día
 const getTimeBasedMessages = () => {
@@ -181,10 +227,19 @@ export function EnhancedSplashScreen({
   const [currentMessageIndex, setCurrentMessageIndex] = useState(0);
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [isReady, setIsReady] = useState(false);
+  const [remoteMessages, setRemoteMessages] = useState<RemoteSplashMessage[] | null>(null);
+  const [splashEnabled, setSplashEnabled] = useState(true);
+  const [splashMode, setSplashMode] = useState<SplashMode>('full');
+  const [minimalDurationMs, setMinimalDurationMs] = useState(DEFAULT_MINIMAL_DURATION_MS);
   
   // Obtener mensajes dinámicos
   const timeBasedMessages = getTimeBasedMessages();
-  const allMessages = [...timeBasedMessages, ...ADDITIONAL_MESSAGES];
+  const fallbackMessages = [...timeBasedMessages, ...ADDITIONAL_MESSAGES];
+  const allMessages: SplashDisplayMessage[] = (remoteMessages && remoteMessages.length > 0 ? remoteMessages : fallbackMessages);
+  const sanitizedDuration = Math.max(duration || DEFAULT_FULL_DURATION_MS, 300);
+  const effectiveDuration = splashMode === 'minimal'
+    ? Math.max(minimalDurationMs, 250)
+    : sanitizedDuration;
   
   // Animaciones principales
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -199,17 +254,174 @@ export function EnhancedSplashScreen({
   const gradientAnim = useRef(new Animated.Value(0)).current;
   const particleAnim = useRef(new Animated.Value(0)).current;
 
+  useEffect(() => {
+
+    const logDebug = (...args: unknown[]) => {
+      if (__DEV__) {
+        console.log('[SplashAPI]', ...args);
+      }
+    };
+
+    const applyRemotePayload = (data: RemoteSplashResponse) => {
+      if (!data?.ok || data.app_slug !== 'despensallena') {
+        logDebug('Payload inválido o app_slug no coincide');
+        return;
+      }
+
+      const enabled = data.flags?.enabled ?? true;
+      const mode = data.flags?.mode ?? 'full';
+      setSplashEnabled(enabled);
+      setSplashMode(mode);
+      setMinimalDurationMs(data.flags?.minimal_duration_ms ?? DEFAULT_MINIMAL_DURATION_MS);
+
+      if (Array.isArray(data.messages) && data.messages.length > 0) {
+        const normalizedMessages = data.messages
+          .filter((item) => item?.title?.trim()?.length > 0)
+          .map((item) => ({
+            id: item.id,
+            title: item.title.trim(),
+            subtitle: item.subtitle?.trim() || '',
+            icon_emoji: item.icon_emoji ?? null,
+            image_url: item.image_url ?? null,
+          }));
+
+        if (normalizedMessages.length > 0) {
+          logDebug('Usando mensajes remotos:', normalizedMessages.length);
+          setRemoteMessages(normalizedMessages);
+          return;
+        }
+      }
+
+      logDebug('Sin mensajes remotos válidos; usando fallback base');
+      setRemoteMessages(null);
+    };
+
+    const loadCachedPayload = async () => {
+      try {
+        const raw = await AsyncStorage.getItem(SPLASH_CACHE_KEY);
+        if (!raw) return;
+
+        const parsed = JSON.parse(raw) as CachedSplashPayload;
+        if (!parsed?.data || !parsed.savedAt || !parsed.ttlSeconds) {
+          return;
+        }
+
+        const expiresAt = parsed.savedAt + parsed.ttlSeconds * 1000;
+        if (Date.now() > expiresAt) {
+          await AsyncStorage.removeItem(SPLASH_CACHE_KEY);
+          logDebug('Cache expirado, se elimina');
+          return;
+        }
+
+        logDebug('Aplicando cache vigente');
+        applyRemotePayload(parsed.data);
+      } catch {
+        logDebug('No se pudo leer cache, se mantiene fallback');
+      }
+    };
+
+    const savePayloadToCache = async (data: RemoteSplashResponse) => {
+      try {
+        const ttlSeconds = data.flags?.cache_ttl_seconds ?? DEFAULT_CACHE_TTL_SECONDS;
+        const payload: CachedSplashPayload = {
+          savedAt: Date.now(),
+          ttlSeconds,
+          data,
+        };
+        await AsyncStorage.setItem(SPLASH_CACHE_KEY, JSON.stringify(payload));
+        logDebug(`Cache guardado con TTL ${ttlSeconds}s`);
+      } catch {
+        logDebug('No se pudo guardar cache');
+      }
+    };
+
+    const fetchWithTimeout = async (url: string, options: RequestInit, timeoutMs: number) => {
+      return await Promise.race([
+        fetch(url, options),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`timeout_${timeoutMs}ms`)), timeoutMs)
+        ),
+      ]);
+    };
+
+    const loadRemoteSplashConfig = async () => {
+      try {
+        await loadCachedPayload();
+
+        const requestOptions: RequestInit = {
+          method: 'GET',
+          headers: {
+            Accept: 'application/json',
+            'X-App-Key': SPLASH_API_KEY,
+          },
+        };
+
+        let response: Response;
+        try {
+          response = await fetchWithTimeout(SPLASH_API_URL, requestOptions, REQUEST_TIMEOUT_MS);
+        } catch (firstError) {
+          // Reintento corto para redes inestables
+          logDebug('Primer intento falló, reintentando una vez...', String(firstError));
+          response = await fetchWithTimeout(SPLASH_API_URL, requestOptions, REQUEST_TIMEOUT_MS + 2000);
+        }
+
+        if (!response.ok) {
+          logDebug('Respuesta no OK:', response.status);
+          try {
+            const bodyText = await response.text();
+            logDebug('Body no OK:', bodyText?.slice(0, 300));
+          } catch {
+            // noop
+          }
+          return;
+        }
+
+        const data = (await response.json()) as RemoteSplashResponse;
+        if (!data?.ok || data.app_slug !== 'despensallena') {
+          logDebug('JSON recibido, pero no válido para despensallena');
+          return;
+        }
+
+        logDebug('Datos remotos cargados correctamente');
+        applyRemotePayload(data);
+        await savePayloadToCache(data);
+      } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        logDebug('Error de red/API, usando cache/fallback:', errorMessage);
+      }
+    };
+
+    loadRemoteSplashConfig();
+
+    return () => {
+      // noop
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!splashEnabled || splashMode === 'off') {
+      onAnimationComplete?.();
+    }
+  }, [splashEnabled, splashMode, onAnimationComplete]);
+
   // Simular carga inteligente
   useEffect(() => {
+    if (!splashEnabled || splashMode === 'off') {
+      setIsReady(true);
+      setLoadingProgress(100);
+      return;
+    }
+
     const loadingSteps = [
-      { progress: 20, delay: 500, text: "Inicializando..." },
-      { progress: 40, delay: 1000, text: "Cargando recursos..." },
-      { progress: 60, delay: 1500, text: "Conectando con servidor..." },
-      { progress: 80, delay: 2000, text: "Preparando interfaz..." },
-      { progress: 100, delay: 2500, text: "¡Listo!" },
+      { progress: 20 },
+      { progress: 40 },
+      { progress: 60 },
+      { progress: 80 },
+      { progress: 100 },
     ];
 
     let currentStep = 0;
+    const stepInterval = Math.max(Math.floor(effectiveDuration / loadingSteps.length), 120);
     const progressInterval = setInterval(() => {
       if (currentStep < loadingSteps.length) {
         setLoadingProgress(loadingSteps[currentStep].progress);
@@ -218,10 +430,10 @@ export function EnhancedSplashScreen({
         setIsReady(true);
         clearInterval(progressInterval);
       }
-    }, 500);
+    }, stepInterval);
 
     return () => clearInterval(progressInterval);
-  }, []);
+  }, [effectiveDuration, splashEnabled, splashMode]);
 
   useEffect(() => {
     // Animación de entrada mejorada
@@ -285,9 +497,10 @@ export function EnhancedSplashScreen({
     }).start();
 
     // Rotación de mensajes mejorada
+    const rotationBase = Math.max(allMessages.length, 1);
     const messageInterval = setInterval(() => {
-      setCurrentMessageIndex((prev) => (prev + 1) % allMessages.length);
-    }, duration / allMessages.length);
+      setCurrentMessageIndex((prev) => (prev + 1) % rotationBase);
+    }, effectiveDuration / rotationBase);
 
     // Animación de fade para mensajes
     const messageFadeInterval = setInterval(() => {
@@ -303,7 +516,7 @@ export function EnhancedSplashScreen({
           useNativeDriver: true,
         }),
       ]).start();
-    }, duration / allMessages.length);
+    }, effectiveDuration / rotationBase);
 
     // Completar animación cuando esté listo
     const completeTimer = setTimeout(() => {
@@ -325,19 +538,29 @@ export function EnhancedSplashScreen({
           onAnimationComplete?.();
         });
       }
-    }, duration);
+    }, effectiveDuration);
 
     return () => {
       clearInterval(messageInterval);
       clearInterval(messageFadeInterval);
       clearTimeout(completeTimer);
     };
-  }, [fadeAnim, scaleAnim, slideAnim, gradientAnim, logoGrowAnim, logoScaleAnim, particleAnim, messageFadeAnim, duration, onAnimationComplete, isReady, allMessages.length]);
+  }, [fadeAnim, scaleAnim, slideAnim, gradientAnim, logoGrowAnim, logoScaleAnim, particleAnim, messageFadeAnim, effectiveDuration, onAnimationComplete, isReady, allMessages.length]);
 
-  const currentMessage = allMessages[currentMessageIndex];
+  const currentMessage: SplashDisplayMessage = allMessages[currentMessageIndex] ?? fallbackMessages[0];
+  const showRemoteImage = Boolean(
+    currentMessage &&
+    'image_url' in currentMessage &&
+    typeof currentMessage.image_url === 'string' &&
+    currentMessage.image_url.startsWith('https://')
+  );
+
+  if (!splashEnabled || splashMode === 'off') {
+    return null;
+  }
 
   // Colores del gradiente
-  const gradientColors = colorScheme === 'dark' 
+  const gradientColors: [string, string, ...string[]] = colorScheme === 'dark' 
     ? ['#1a1a1a', '#2d2d2d', '#80b918', '#6ba315']
     : ['#80b918', '#6ba315', '#5a8f12', '#4a7a0f'];
 
@@ -398,9 +621,21 @@ export function EnhancedSplashScreen({
           { opacity: messageFadeAnim }
         ]}
       >
-        <Text style={styles.messageIcon}>{currentMessage.icon}</Text>
+        {showRemoteImage ? (
+          <Image
+            source={{ uri: (currentMessage as RemoteSplashMessage).image_url! }}
+            style={styles.messageImage}
+            resizeMode="cover"
+          />
+        ) : (
+          <Text style={styles.messageIcon}>
+            {'icon_emoji' in currentMessage ? (currentMessage.icon_emoji || '🛒') : currentMessage.icon}
+          </Text>
+        )}
         <Text style={styles.messageTitle}>{currentMessage.title}</Text>
-        <Text style={styles.messageSubtitle}>{currentMessage.subtitle}</Text>
+        <Text style={styles.messageSubtitle}>
+          {currentMessage.subtitle || ''}
+        </Text>
       </Animated.View>
 
         {/* Barra de Progreso Inteligente */}
@@ -512,6 +747,26 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0, 0, 0, 0.3)',
     textShadowOffset: { width: 0, height: 2 },
     textShadowRadius: 4,
+  },
+  messageImage: {
+    width: 78,
+    height: 78,
+    marginBottom: 16,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.4)',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.25,
+        shadowRadius: 8,
+      },
+      android: {
+        elevation: 6,
+      },
+      default: {},
+    }),
   },
   messageTitle: {
     fontSize: 20,
