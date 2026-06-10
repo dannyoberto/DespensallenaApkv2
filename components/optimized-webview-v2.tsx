@@ -15,7 +15,7 @@ import { useGoogleOAuth } from '@/hooks/use-google-oauth';
 import { useNetworkStatus } from '@/hooks/use-network-status';
 import { webviewLogger } from '@/utils/logger';
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
-import { Animated, StyleSheet, Text, View } from 'react-native';
+import { Animated, Platform, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
 import { GoogleOAuthHandler } from './google-oauth-handler';
@@ -53,15 +53,6 @@ export const OptimizedWebView = forwardRef<OptimizedWebViewRef, OptimizedWebView
   const [isGooglePage, setIsGooglePage] = useState(false);
   const [currentUrl, setCurrentUrl] = useState(source.uri);
   
-  // Calculate dynamic bottom spacing
-  const getBottomSpacing = () => {
-    const baseSpacing = Math.max(insets.bottom, 20);
-    const debugHeight = __DEV__ ? 20 : 0; // Height of debug info when visible
-    
-    // Preserve only safe-area spacing now that footer controls are hidden.
-    return baseSpacing + debugHeight;
-  };
-  
   // Refs
   const webViewRef = useRef<WebView>(null);
   const progressAnimation = useRef(new Animated.Value(0)).current;
@@ -74,6 +65,18 @@ export const OptimizedWebView = forwardRef<OptimizedWebViewRef, OptimizedWebView
   const { isConnected, isInternetReachable, isSlowConnection, connectionType } = useNetworkStatus();
   const cacheManager = useCacheManager();
   const googleOAuth = useGoogleOAuth();
+
+  // Coincide con la visibilidad de `NetworkStatusIndicator` (showWhenConnected={isSlowConnection})
+  const networkBannerVisible =
+    !isConnected || !isInternetReachable || isSlowConnection;
+  /** Margen superior cuando el banner de red (absoluto) está visible, para no tapar la barra */
+  const progressBarMarginTop = networkBannerVisible ? 44 : 0;
+
+  const getBottomSpacing = () => {
+    const baseSpacing = Math.max(insets.bottom, 20);
+    const debugHeight = __DEV__ ? 20 : 0;
+    return baseSpacing + debugHeight;
+  };
 
   // Expose methods to parent component
   useImperativeHandle(ref, () => ({
@@ -505,44 +508,56 @@ export const OptimizedWebView = forwardRef<OptimizedWebViewRef, OptimizedWebView
           </Text>
         </View>
       )}
-      
-      {/* WebView */}
-      <WebView
-        ref={webViewRef}
-        {...webViewConfig}
-        style={[styles.webview, { marginBottom: getBottomSpacing() }]}
-      />
-      
-      {/* Footer Progress Bar - Non-blocking */}
-      {showProgress && (
-        <View style={[styles.footerProgressContainer, { 
-          bottom: Math.max(insets.bottom + 10, 24) 
-        }]}>
-          <View style={styles.footerProgressTrack}>
-            <Animated.View
-              style={[
-                styles.footerProgressBar,
-                {
-                  width: progressAnimation.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: ['0%', '100%'],
-                  }),
+
+      {/*
+        La barra va en flujo (no absolute encima del WebView): en Android el WebView
+        suele pintar por encima de hermanos superpuestos y la barra quedaba invisible.
+      */}
+      <View style={styles.webViewColumn}>
+        {showProgress && (
+          <View
+            pointerEvents="none"
+            style={[
+              styles.topProgressContainer,
+              { marginTop: progressBarMarginTop },
+              Platform.select({
+                ios: {
+                  shadowColor: '#000',
+                  shadowOffset: { width: 0, height: 2 },
+                  shadowOpacity: 0.12,
+                  shadowRadius: 3,
                 },
-              ]}
-            />
+                android: { elevation: 3 },
+                default: {},
+              }),
+            ]}
+          >
+            <View style={styles.topProgressTrack}>
+              <Animated.View
+                style={[
+                  styles.topProgressFill,
+                  {
+                    width: progressAnimation.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: ['0%', '100%'],
+                    }),
+                  },
+                ]}
+              />
+            </View>
           </View>
-          {isSlowConnection && (
-            <Text style={styles.footerProgressText}>Conexión lenta...</Text>
-          )}
-        </View>
-      )}
-      
+        )}
+        <WebView
+          ref={webViewRef}
+          {...webViewConfig}
+          style={[styles.webview, { marginBottom: getBottomSpacing() }]}
+        />
+      </View>
+
       {/* Cache Info (Debug) */}
       {__DEV__ && (
         <View style={[styles.debugInfo, { 
-          bottom: showProgress 
-            ? Math.max(insets.bottom + 56, 70) 
-            : Math.max(insets.bottom + 20, 36) 
+          bottom: Math.max(insets.bottom + 20, 36),
         }]}>
           <Text style={styles.debugText}>
             Cache: {cacheManager.config.enabled ? 'ON' : 'OFF'} | 
@@ -559,45 +574,31 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
+  webViewColumn: {
+    flex: 1,
+  },
   webview: {
     flex: 1,
   },
-  footerProgressContainer: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    zIndex: 20,
-    backgroundColor: '#80b918',
-    paddingVertical: 4,
-    paddingHorizontal: 16,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255, 255, 255, 0.2)',
-    elevation: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: -2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 4,
-    borderTopLeftRadius: 8,
-    borderTopRightRadius: 8,
+  topProgressContainer: {
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(0, 0, 0, 0.1)',
+    paddingTop: 4,
+    paddingBottom: 5,
+    paddingHorizontal: 0,
   },
-  footerProgressTrack: {
-    height: 5,
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-    borderRadius: 3,
+  topProgressTrack: {
+    height: 4,
+    marginHorizontal: 12,
+    backgroundColor: 'rgba(128, 185, 24, 0.22)',
+    borderRadius: 2,
     overflow: 'hidden',
   },
-  footerProgressBar: {
+  topProgressFill: {
     height: '100%',
-    borderRadius: 3,
-    backgroundColor: '#FFFFFF',
-  },
-  footerProgressText: {
-    marginTop: 6,
-    color: '#FFFFFF',
-    fontSize: 12,
-    textAlign: 'center',
-    fontWeight: '700',
-    letterSpacing: 0.5,
+    borderRadius: 2,
+    backgroundColor: '#80b918',
   },
   errorContainer: {
     position: 'absolute',

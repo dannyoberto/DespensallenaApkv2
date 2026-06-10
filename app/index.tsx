@@ -1,3 +1,4 @@
+import { useSplashController } from '@/contexts/splash-controller-context';
 import { OptimizedWebView, OptimizedWebViewRef } from '@/components/optimized-webview-v2';
 import { logger } from '@/utils/logger';
 import React, { useEffect, useRef, useState } from 'react';
@@ -6,6 +7,7 @@ import { Alert, BackHandler } from 'react-native';
 export default function HomeScreen() {
   const webViewRef = useRef<OptimizedWebViewRef>(null);
   const [canGoBack, setCanGoBack] = useState(false);
+  const { notifyWebViewReady } = useSplashController();
 
   useEffect(() => {
     const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
@@ -50,6 +52,7 @@ export default function HomeScreen() {
       }}
       onLoadEnd={() => {
         logger.info('✅ WebView loading completed');
+        notifyWebViewReady();
       }}
       onError={(error) => {
         logger.error('❌ WebView error:', error);

@@ -7,21 +7,23 @@ import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useNetworkStatus } from '@/hooks/use-network-status';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { LinearGradient } from 'expo-linear-gradient';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
-    Animated,
-    Dimensions,
-    Easing,
-    Image,
-    Platform,
-    StyleSheet,
-    Text,
-    View,
+  Animated,
+  Dimensions,
+  Easing,
+  Image,
+  Platform,
+  StyleSheet,
+  Text,
+  View,
 } from 'react-native';
 
 interface EnhancedSplashScreenProps {
   onAnimationComplete?: () => void;
   duration?: number;
+  appReady?: boolean;
+  maxWaitMs?: number;
 }
 
 type SplashMode = 'full' | 'minimal' | 'off';
@@ -56,19 +58,92 @@ interface FallbackSplashMessage {
 type SplashDisplayMessage = RemoteSplashMessage | FallbackSplashMessage;
 
 const { width, height } = Dimensions.get('window');
-const SPLASH_API_URL = 'https://ivory-termite-568859.hostingersite.com/ApiDespensallenaApk/public/api/v1/splash';
+const SPLASH_API_URL = 'https://apiapp.despensallena.com/api/v1/splash';
 const SPLASH_API_KEY = 'key-despensa';
 const REQUEST_TIMEOUT_MS = 6000;
 const SPLASH_CACHE_KEY = '@despensallena_splash_cache_v1';
 const DEFAULT_CACHE_TTL_SECONDS = 300;
 const DEFAULT_MINIMAL_DURATION_MS = 400;
 const DEFAULT_FULL_DURATION_MS = 3000;
+const DEFAULT_MAX_WAIT_MS = 15000;
 
 interface CachedSplashPayload {
   savedAt: number;
   ttlSeconds: number;
   data: RemoteSplashResponse;
 }
+
+const logSplashDebug = (...args: unknown[]) => {
+  if (__DEV__) {
+    console.log('[SplashAPI]', ...args);
+  }
+};
+
+const normalizeRemoteMessages = (messages: RemoteSplashMessage[] | undefined): RemoteSplashMessage[] | null => {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return null;
+  }
+
+  const normalizedMessages = messages
+    .filter((item) => item?.title?.trim()?.length > 0)
+    .map((item) => ({
+      id: item.id,
+      title: item.title.trim(),
+      subtitle: item.subtitle?.trim() || '',
+      icon_emoji: item.icon_emoji ?? null,
+      image_url: item.image_url ?? null,
+    }));
+
+  return normalizedMessages.length > 0 ? normalizedMessages : null;
+};
+
+const readCachedSplashPayload = async (): Promise<RemoteSplashResponse | null> => {
+  try {
+    const raw = await AsyncStorage.getItem(SPLASH_CACHE_KEY);
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw) as CachedSplashPayload;
+    if (!parsed?.data || !parsed.savedAt || !parsed.ttlSeconds) {
+      return null;
+    }
+
+    const expiresAt = parsed.savedAt + parsed.ttlSeconds * 1000;
+    if (Date.now() > expiresAt) {
+      await AsyncStorage.removeItem(SPLASH_CACHE_KEY);
+      logSplashDebug('Cache expirado, se elimina');
+      return null;
+    }
+
+    return parsed.data;
+  } catch {
+    logSplashDebug('No se pudo leer cache, se mantiene fallback');
+    return null;
+  }
+};
+
+const saveSplashPayloadToCache = async (data: RemoteSplashResponse) => {
+  try {
+    const ttlSeconds = data.flags?.cache_ttl_seconds ?? DEFAULT_CACHE_TTL_SECONDS;
+    const payload: CachedSplashPayload = {
+      savedAt: Date.now(),
+      ttlSeconds,
+      data,
+    };
+    await AsyncStorage.setItem(SPLASH_CACHE_KEY, JSON.stringify(payload));
+    logSplashDebug(`Cache guardado con TTL ${ttlSeconds}s`);
+  } catch {
+    logSplashDebug('No se pudo guardar cache');
+  }
+};
+
+const fetchSplashWithTimeout = async (url: string, options: RequestInit, timeoutMs: number) => {
+  return await Promise.race([
+    fetch(url, options),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`timeout_${timeoutMs}ms`)), timeoutMs)
+    ),
+  ]);
+};
 
 // Mensajes dinámicos basados en la hora del día
 const getTimeBasedMessages = () => {
@@ -220,7 +295,9 @@ const FloatingParticle = ({ delay, duration, size, opacity }: {
 
 export function EnhancedSplashScreen({ 
   onAnimationComplete, 
-  duration = 3000 
+  duration = 3000,
+  appReady = false,
+  maxWaitMs = DEFAULT_MAX_WAIT_MS,
 }: EnhancedSplashScreenProps) {
   const colorScheme = useColorScheme();
   const { isConnected } = useNetworkStatus();
@@ -231,6 +308,8 @@ export function EnhancedSplashScreen({
   const [splashEnabled, setSplashEnabled] = useState(true);
   const [splashMode, setSplashMode] = useState<SplashMode>('full');
   const [minimalDurationMs, setMinimalDurationMs] = useState(DEFAULT_MINIMAL_DURATION_MS);
+  const mountedAtRef = useRef(Date.now());
+  const hasCompletedRef = useRef(false);
   
   // Obtener mensajes dinámicos
   const timeBasedMessages = getTimeBasedMessages();
@@ -240,9 +319,10 @@ export function EnhancedSplashScreen({
   const effectiveDuration = splashMode === 'minimal'
     ? Math.max(minimalDurationMs, 250)
     : sanitizedDuration;
+  const useInstantFadeIn = effectiveDuration < 1200;
   
   // Animaciones principales
-  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const fadeAnim = useRef(new Animated.Value(useInstantFadeIn ? 1 : 0)).current;
   const scaleAnim = useRef(new Animated.Value(0.8)).current;
   const slideAnim = useRef(new Animated.Value(50)).current;
   const progressAnim = useRef(new Animated.Value(0)).current;
@@ -254,17 +334,12 @@ export function EnhancedSplashScreen({
   const gradientAnim = useRef(new Animated.Value(0)).current;
   const particleAnim = useRef(new Animated.Value(0)).current;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    let isMounted = true;
 
-    const logDebug = (...args: unknown[]) => {
-      if (__DEV__) {
-        console.log('[SplashAPI]', ...args);
-      }
-    };
-
-    const applyRemotePayload = (data: RemoteSplashResponse) => {
+    const applyRemotePayload = (data: RemoteSplashResponse, source: 'cache' | 'api') => {
       if (!data?.ok || data.app_slug !== 'despensallena') {
-        logDebug('Payload inválido o app_slug no coincide');
+        logSplashDebug('Payload inválido o app_slug no coincide');
         return;
       }
 
@@ -274,80 +349,54 @@ export function EnhancedSplashScreen({
       setSplashMode(mode);
       setMinimalDurationMs(data.flags?.minimal_duration_ms ?? DEFAULT_MINIMAL_DURATION_MS);
 
-      if (Array.isArray(data.messages) && data.messages.length > 0) {
-        const normalizedMessages = data.messages
-          .filter((item) => item?.title?.trim()?.length > 0)
-          .map((item) => ({
-            id: item.id,
-            title: item.title.trim(),
-            subtitle: item.subtitle?.trim() || '',
-            icon_emoji: item.icon_emoji ?? null,
-            image_url: item.image_url ?? null,
-          }));
-
-        if (normalizedMessages.length > 0) {
-          logDebug('Usando mensajes remotos:', normalizedMessages.length);
-          setRemoteMessages(normalizedMessages);
-          return;
-        }
+      const normalizedMessages = normalizeRemoteMessages(data.messages);
+      if (normalizedMessages) {
+        logSplashDebug(`Usando mensajes remotos (${source}):`, normalizedMessages.length);
+        setRemoteMessages(normalizedMessages);
+        return;
       }
 
-      logDebug('Sin mensajes remotos válidos; usando fallback base');
+      logSplashDebug(`Sin mensajes remotos válidos (${source}); usando fallback base`);
       setRemoteMessages(null);
     };
 
-    const loadCachedPayload = async () => {
-      try {
-        const raw = await AsyncStorage.getItem(SPLASH_CACHE_KEY);
-        if (!raw) return;
+    readCachedSplashPayload().then((cachedData) => {
+      if (!isMounted || !cachedData) return;
+      logSplashDebug('Aplicando cache vigente');
+      applyRemotePayload(cachedData, 'cache');
+    });
 
-        const parsed = JSON.parse(raw) as CachedSplashPayload;
-        if (!parsed?.data || !parsed.savedAt || !parsed.ttlSeconds) {
-          return;
-        }
-
-        const expiresAt = parsed.savedAt + parsed.ttlSeconds * 1000;
-        if (Date.now() > expiresAt) {
-          await AsyncStorage.removeItem(SPLASH_CACHE_KEY);
-          logDebug('Cache expirado, se elimina');
-          return;
-        }
-
-        logDebug('Aplicando cache vigente');
-        applyRemotePayload(parsed.data);
-      } catch {
-        logDebug('No se pudo leer cache, se mantiene fallback');
-      }
+    return () => {
+      isMounted = false;
     };
+  }, []);
 
-    const savePayloadToCache = async (data: RemoteSplashResponse) => {
-      try {
-        const ttlSeconds = data.flags?.cache_ttl_seconds ?? DEFAULT_CACHE_TTL_SECONDS;
-        const payload: CachedSplashPayload = {
-          savedAt: Date.now(),
-          ttlSeconds,
-          data,
-        };
-        await AsyncStorage.setItem(SPLASH_CACHE_KEY, JSON.stringify(payload));
-        logDebug(`Cache guardado con TTL ${ttlSeconds}s`);
-      } catch {
-        logDebug('No se pudo guardar cache');
+  useEffect(() => {
+    let isMounted = true;
+
+    const applyRemotePayload = (data: RemoteSplashResponse, source: 'cache' | 'api') => {
+      if (!isMounted || !data?.ok || data.app_slug !== 'despensallena') {
+        return;
       }
-    };
 
-    const fetchWithTimeout = async (url: string, options: RequestInit, timeoutMs: number) => {
-      return await Promise.race([
-        fetch(url, options),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`timeout_${timeoutMs}ms`)), timeoutMs)
-        ),
-      ]);
+      const enabled = data.flags?.enabled ?? true;
+      const mode = data.flags?.mode ?? 'full';
+      setSplashEnabled(enabled);
+      setSplashMode(mode);
+      setMinimalDurationMs(data.flags?.minimal_duration_ms ?? DEFAULT_MINIMAL_DURATION_MS);
+
+      const normalizedMessages = normalizeRemoteMessages(data.messages);
+      if (normalizedMessages) {
+        logSplashDebug(`Usando mensajes remotos (${source}):`, normalizedMessages.length);
+        setRemoteMessages(normalizedMessages);
+        return;
+      }
+
+      setRemoteMessages(null);
     };
 
     const loadRemoteSplashConfig = async () => {
       try {
-        await loadCachedPayload();
-
         const requestOptions: RequestInit = {
           method: 'GET',
           headers: {
@@ -358,51 +407,112 @@ export function EnhancedSplashScreen({
 
         let response: Response;
         try {
-          response = await fetchWithTimeout(SPLASH_API_URL, requestOptions, REQUEST_TIMEOUT_MS);
+          response = await fetchSplashWithTimeout(SPLASH_API_URL, requestOptions, REQUEST_TIMEOUT_MS);
         } catch (firstError) {
-          // Reintento corto para redes inestables
-          logDebug('Primer intento falló, reintentando una vez...', String(firstError));
-          response = await fetchWithTimeout(SPLASH_API_URL, requestOptions, REQUEST_TIMEOUT_MS + 2000);
+          logSplashDebug('Primer intento falló, reintentando una vez...', String(firstError));
+          response = await fetchSplashWithTimeout(SPLASH_API_URL, requestOptions, REQUEST_TIMEOUT_MS + 2000);
         }
 
         if (!response.ok) {
-          logDebug('Respuesta no OK:', response.status);
-          try {
-            const bodyText = await response.text();
-            logDebug('Body no OK:', bodyText?.slice(0, 300));
-          } catch {
-            // noop
-          }
+          logSplashDebug('Respuesta no OK:', response.status);
           return;
         }
 
         const data = (await response.json()) as RemoteSplashResponse;
         if (!data?.ok || data.app_slug !== 'despensallena') {
-          logDebug('JSON recibido, pero no válido para despensallena');
+          logSplashDebug('JSON recibido, pero no válido para despensallena');
           return;
         }
 
-        logDebug('Datos remotos cargados correctamente');
-        applyRemotePayload(data);
-        await savePayloadToCache(data);
+        logSplashDebug('Datos remotos cargados correctamente');
+        applyRemotePayload(data, 'api');
+        await saveSplashPayloadToCache(data);
       } catch (error: unknown) {
         const errorMessage = error instanceof Error ? error.message : String(error);
-        logDebug('Error de red/API, usando cache/fallback:', errorMessage);
+        logSplashDebug('Error de red/API, usando cache/fallback:', errorMessage);
       }
     };
 
     loadRemoteSplashConfig();
 
     return () => {
-      // noop
+      isMounted = false;
     };
   }, []);
 
   useEffect(() => {
-    if (!splashEnabled || splashMode === 'off') {
-      onAnimationComplete?.();
+    if (effectiveDuration < 1200) {
+      fadeAnim.setValue(1);
     }
-  }, [splashEnabled, splashMode, onAnimationComplete]);
+  }, [effectiveDuration, fadeAnim]);
+
+  const runExitAnimation = useCallback(() => {
+    if (hasCompletedRef.current) {
+      return;
+    }
+    hasCompletedRef.current = true;
+
+    Animated.parallel([
+      Animated.timing(fadeAnim, {
+        toValue: 0,
+        duration: 800,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.timing(scaleAnim, {
+        toValue: 1.2,
+        duration: 800,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      onAnimationComplete?.();
+    });
+  }, [fadeAnim, scaleAnim, onAnimationComplete]);
+
+  const tryDismissSplash = useCallback(() => {
+    if (hasCompletedRef.current) {
+      return;
+    }
+
+    if (!splashEnabled || splashMode === 'off') {
+      if (appReady) {
+        hasCompletedRef.current = true;
+        onAnimationComplete?.();
+      }
+      return;
+    }
+
+    const elapsed = Date.now() - mountedAtRef.current;
+    const minDurationReached = elapsed >= effectiveDuration;
+    const forceClose = elapsed >= maxWaitMs;
+
+    if ((minDurationReached && appReady) || forceClose) {
+      runExitAnimation();
+    }
+  }, [
+    appReady,
+    effectiveDuration,
+    maxWaitMs,
+    onAnimationComplete,
+    runExitAnimation,
+    splashEnabled,
+    splashMode,
+  ]);
+
+  useEffect(() => {
+    tryDismissSplash();
+  }, [tryDismissSplash]);
+
+  useEffect(() => {
+    const minTimer = setTimeout(tryDismissSplash, effectiveDuration);
+    const forceTimer = setTimeout(tryDismissSplash, maxWaitMs);
+
+    return () => {
+      clearTimeout(minTimer);
+      clearTimeout(forceTimer);
+    };
+  }, [effectiveDuration, maxWaitMs, tryDismissSplash]);
 
   // Simular carga inteligente
   useEffect(() => {
@@ -436,14 +546,7 @@ export function EnhancedSplashScreen({
   }, [effectiveDuration, splashEnabled, splashMode]);
 
   useEffect(() => {
-    // Animación de entrada mejorada
-    Animated.parallel([
-      Animated.timing(fadeAnim, {
-        toValue: 1,
-        duration: 1000,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
-      }),
+    const entryAnimations: Animated.CompositeAnimation[] = [
       Animated.spring(scaleAnim, {
         toValue: 1,
         tension: 40,
@@ -452,16 +555,29 @@ export function EnhancedSplashScreen({
       }),
       Animated.timing(slideAnim, {
         toValue: 0,
-        duration: 1000,
+        duration: useInstantFadeIn ? 500 : 1000,
         easing: Easing.out(Easing.cubic),
         useNativeDriver: true,
       }),
       Animated.timing(gradientAnim, {
         toValue: 1,
-        duration: 1500,
+        duration: useInstantFadeIn ? 500 : 1500,
         useNativeDriver: true,
       }),
-    ]).start();
+    ];
+
+    if (!useInstantFadeIn) {
+      entryAnimations.unshift(
+        Animated.timing(fadeAnim, {
+          toValue: 1,
+          duration: 1000,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        })
+      );
+    }
+
+    Animated.parallel(entryAnimations).start();
 
     // Animación de crecimiento del logo (grow effect)
     Animated.sequence([
@@ -518,34 +634,11 @@ export function EnhancedSplashScreen({
       ]).start();
     }, effectiveDuration / rotationBase);
 
-    // Completar animación cuando esté listo
-    const completeTimer = setTimeout(() => {
-      if (isReady) {
-        Animated.parallel([
-          Animated.timing(fadeAnim, {
-            toValue: 0,
-            duration: 800,
-            easing: Easing.in(Easing.cubic),
-            useNativeDriver: true,
-          }),
-          Animated.timing(scaleAnim, {
-            toValue: 1.2,
-            duration: 800,
-            easing: Easing.in(Easing.cubic),
-            useNativeDriver: true,
-          }),
-        ]).start(() => {
-          onAnimationComplete?.();
-        });
-      }
-    }, effectiveDuration);
-
     return () => {
       clearInterval(messageInterval);
       clearInterval(messageFadeInterval);
-      clearTimeout(completeTimer);
     };
-  }, [fadeAnim, scaleAnim, slideAnim, gradientAnim, logoGrowAnim, logoScaleAnim, particleAnim, messageFadeAnim, effectiveDuration, onAnimationComplete, isReady, allMessages.length]);
+  }, [fadeAnim, scaleAnim, slideAnim, gradientAnim, logoGrowAnim, logoScaleAnim, particleAnim, messageFadeAnim, effectiveDuration, allMessages.length, useInstantFadeIn]);
 
   const currentMessage: SplashDisplayMessage = allMessages[currentMessageIndex] ?? fallbackMessages[0];
   const showRemoteImage = Boolean(

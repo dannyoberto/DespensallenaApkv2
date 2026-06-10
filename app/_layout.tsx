@@ -2,51 +2,67 @@ import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
+import { StyleSheet, View } from 'react-native';
 import 'react-native-reanimated';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { EnhancedSplashScreen } from '@/components/enhanced-splash-screen';
+import { SplashControllerProvider, useSplashController } from '@/contexts/splash-controller-context';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 
-// Keep the splash screen visible while we fetch resources
 SplashScreen.preventAutoHideAsync();
 
-export default function RootLayout() {
+function RootLayoutContent() {
   const colorScheme = useColorScheme();
-  const [showEnhancedSplash, setShowEnhancedSplash] = useState(true);
+  const { webViewReady, showSplashOverlay, dismissSplashOverlay } = useSplashController();
 
   useEffect(() => {
-    // Hide the splash screen when the app is ready
-    const hideSplash = async () => {
-      // Wait longer to ensure WebView is ready and splash screen is visible
-      await new Promise(resolve => setTimeout(resolve, 4000)); // Wait 4 seconds
-      await SplashScreen.hideAsync();
-    };
-    
-    hideSplash();
+    SplashScreen.hideAsync().catch(() => {
+      // noop
+    });
   }, []);
 
-  const handleSplashComplete = () => {
-    setShowEnhancedSplash(false);
-  };
+  return (
+    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+      <View style={styles.root}>
+        <Stack>
+          <Stack.Screen name="index" options={{ headerShown: false }} />
+          <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
+        </Stack>
 
+        {showSplashOverlay && (
+          <View style={styles.splashOverlay} pointerEvents="auto">
+            <EnhancedSplashScreen
+              appReady={webViewReady}
+              onAnimationComplete={dismissSplashOverlay}
+              duration={3500}
+            />
+          </View>
+        )}
+      </View>
+      <StatusBar style="light" backgroundColor="#80b918" />
+    </ThemeProvider>
+  );
+}
+
+export default function RootLayout() {
   return (
     <SafeAreaProvider>
-      <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-        {showEnhancedSplash ? (
-          <EnhancedSplashScreen 
-            onAnimationComplete={handleSplashComplete}
-            duration={3500}
-          />
-        ) : (
-          <Stack>
-            <Stack.Screen name="index" options={{ headerShown: false }} />
-            <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
-          </Stack>
-        )}
-        <StatusBar style="light" backgroundColor="#80b918" />
-      </ThemeProvider>
+      <SplashControllerProvider>
+        <RootLayoutContent />
+      </SplashControllerProvider>
     </SafeAreaProvider>
   );
 }
+
+const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+  },
+  splashOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 9999,
+    elevation: 9999,
+  },
+});
